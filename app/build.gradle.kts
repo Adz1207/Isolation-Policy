@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.android.cache.fix)
 }
 
 val keystorePath: String? = System.getenv("KEYSTORE_PATH")
@@ -16,8 +15,8 @@ android {
         applicationId = "io.github.mhmrdd.isolationpolicy"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     signingConfigs {
@@ -45,8 +44,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     buildFeatures {
@@ -55,7 +54,19 @@ android {
     }
 
     packaging {
-        resources.excludes += "**"
+        // JANGAN exclude "**": META-INF/xposed/* (java_init.list, module.prop, scope.list)
+        // harus ikut masuk ke APK supaya LSPosed mengenali modul.
+        resources.excludes += setOf(
+            "META-INF/*.version",
+            "META-INF/*.kotlin_module",
+            "META-INF/LICENSE*",
+            "META-INF/NOTICE*",
+            "META-INF/DEPENDENCIES",
+            "META-INF/AL2.0",
+            "META-INF/LGPL2.1",
+            "kotlin-tooling-metadata.json",
+            "DebugProbesKt.bin"
+        )
     }
 
     dependenciesInfo {
@@ -65,6 +76,9 @@ android {
 }
 
 dependencies {
-    compileOnly(libs.xposed.api)
+    // API hook: disediakan framework saat runtime, jangan di-bundle.
+    compileOnly(libs.libxposed.api)
+    // Service: komunikasi app <-> framework (status modul & remote preferences).
+    implementation(libs.libxposed.service)
     implementation(libs.androidx.recyclerview)
 }

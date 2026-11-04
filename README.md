@@ -12,6 +12,31 @@ The hook is on `com.android.server.am.ProcessList#startProcessLocked` inside `sy
 
 System packages cannot be added to the deny list. The module's own package is always denied and cannot be unchecked, so the built-in tester can verify that the hook is blocking `useAppZygote` binds for the host.
 
+## Requirements
+
+- Android 10+ (API 29), rooted, with an LSPosed-compatible framework that implements the **modern Xposed API (libxposed 101/102)**.
+- Module scope: **System Framework** (`system`). Enable the module in LSPosed, then reboot.
+
+## Build
+
+Requires JDK 17 or newer and the Android SDK (platform 36).
+
+```
+chmod +x gradlew
+./gradlew assembleDebug
+```
+
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The GitHub Actions workflow (`Android CI`) produces the same artifact.
+
+For a signed release build, set `KEYSTORE_PATH`, `KEYSTORE_PASS` and `KEYPASS` (key alias `isolationpolicy`) and run `./gradlew assembleRelease`.
+
+## libxposed 102 notes
+
+- Dependencies: `compileOnly io.github.libxposed:api:102.0.0` and `implementation io.github.libxposed:service:102.0.0`.
+- Module metadata lives in `app/src/main/resources/META-INF/xposed/` (`module.prop`, `scope.list`, `java_init.list`); the legacy `xposed_init` and manifest meta-data are gone.
+- Hooks use the interceptor-chain model (`hook(method).intercept(chain -> ...)`) and are installed from `onSystemServerStarting`.
+- The deny list is written by the app through the service's remote preferences (group `policy`) and read by the hook inside `system_server`.
+
 ## References
 
 - LSPosed/DirtySepolicy: https://github.com/LSPosed/DirtySepolicy

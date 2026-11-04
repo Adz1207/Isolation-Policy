@@ -9,7 +9,7 @@ val haveReleaseSigning = !keystorePath.isNullOrEmpty() && file(keystorePath).exi
 
 android {
     namespace = "io.github.mhmrdd.isolationpolicy"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "io.github.mhmrdd.isolationpolicy"

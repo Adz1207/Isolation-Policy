@@ -1,37 +1,33 @@
 package io.github.mhmrdd.isolationpolicy;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import android.util.Log;
 
-public class Entry implements IXposedHookLoadPackage {
+import androidx.annotation.NonNull;
+
+import io.github.libxposed.api.XposedModule;
+
+/**
+ * Entry point modul (libxposed API 102).
+ *
+ * Didaftarkan lewat META-INF/xposed/java_init.list. Scope modul adalah virtual
+ * package "system" (system_server) yang ditulis di META-INF/xposed/scope.list.
+ */
+public class Entry extends XposedModule {
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (Constants.APPLICATION_ID.equals(lpparam.packageName)) {
-            hookSelf(lpparam.classLoader);
-            return;
-        }
-        if (!"android".equals(lpparam.packageName)) return;
-        Logger.i("handleLoadPackage on android, processName=" + lpparam.processName);
-        BindHook.install(lpparam.classLoader);
+    public void onModuleLoaded(@NonNull ModuleLoadedParam param) {
+        Logger.attach(this);
+        Logger.i("module loaded in process=" + param.getProcessName()
+                + " systemServer=" + param.isSystemServer()
+                + " api=" + getApiVersion());
     }
 
-    private static void hookSelf(ClassLoader cl) {
+    @Override
+    public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
         try {
-            Class<?> c = XposedHelpers.findClass(
-                    "io.github.mhmrdd.isolationpolicy.ModuleStatus", cl);
-            int n = XposedBridge.hookAllMethods(c, "isActive", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    param.setResult(Boolean.TRUE);
-                }
-            }).size();
-            Logger.i("ModuleStatus.isActive hooked in app process count=" + n);
+            BindHook.install(this, param.getClassLoader());
         } catch (Throwable t) {
-            Logger.e("hookSelf failed", t);
+            log(Log.ERROR, Constants.TAG, "BindHook.install failed", t);
         }
     }
 }

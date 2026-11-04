@@ -19,20 +19,20 @@ public final class AppZygote implements ZygotePreload {
     }
 
     static String readSelfContext() {
-        BufferedReader r = null;
-        try {
-            r = new BufferedReader(new FileReader("/proc/self/attr/current"));
+        try (BufferedReader r = new BufferedReader(new FileReader("/proc/self/attr/current"))) {
             String line = r.readLine();
             if (line == null) return null;
             return line.replace("\u0000", "").trim();
         } catch (Throwable t) {
             return null;
-        } finally {
-            if (r != null) try { r.close(); } catch (Throwable ignored) {}
         }
     }
 
     static int currentUid() {
-        try { return Os.getuid(); } catch (Throwable t) { return -1; }
+        try { 
+            return Os.getuid(); 
+        } catch (Throwable t) { 
+            return -1; 
+        }
     }
 }

@@ -1,66 +1,117 @@
 package io.github.mhmrdd.isolationpolicy;
 
+import android.content.SharedPreferences;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XSharedPreferences;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
 
-public class BindHook {
+/**
+ * Hook ProcessList#startProcessLocked di system_server.
+ * Jika proses dihosting App Zygote dan paketnya ada di daftar tolak, permintaan
+ * dilaporkan "berhasil" tanpa melakukan fork.
+ */
+public final class BindHook {
 
     private static final String HOSTING_RECORD = "com.android.server.am.HostingRecord";
     private static final String PROCESS_RECORD = "com.android.server.am.ProcessRecord";
 
-    private static final XSharedPreferences sPrefs =
-            new XSharedPreferences(Constants.APPLICATION_ID, Constants.PREFS_NAME);
+    private static volatile XposedModule sModule;
+    private static volatile SharedPreferences sPrefs;
 
-    static {
-        sPrefs.makeWorldReadable();
-    }
+    private BindHook() {}
 
-    public static void install(ClassLoader cl) {
+    static void install(@NonNull XposedModule module, @NonNull ClassLoader cl) {
+        sModule = module;
+        sPrefs = openPrefs();
+
         try {
-            Class<?> processList = XposedHelpers.findClass(
-                    "com.android.server.am.ProcessList", cl);
-            int n = XposedBridge.hookAllMethods(processList, "startProcessLocked", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (param.method == null) return;
-                    if (((java.lang.reflect.Method) param.method).getReturnType() != Boolean.TYPE) return;
-
-                    Object hr = null;
-                    Object pr = null;
-                    for (Object arg : param.args) {
-                        if (arg == null) continue;
-                        String cn = arg.getClass().getName();
-                        if (hr == null && HOSTING_RECORD.equals(cn)) hr = arg;
-                        else if (pr == null && PROCESS_RECORD.equals(cn)) pr = arg;
+            Class<?> processList = cl.loadClass("com.android.server.am.ProcessList");
+            int count = 0;
+            for (Method method : processList.getDeclaredMethods()) {
+                if ("startProcessLocked".equals(method.getName())
+                        && method.getReturnType() == boolean.class) {
+                    try {
+                        // API 101+: hook(...) mengembalikan builder, lalu intercept(Hooker)
+                        module.hook(method).intercept(new StartProcessLockedHooker());
+                        count++;
+                    } catch (Throwable t) {
+                        Logger.e("Failed to hook " + method, t);
                     }
-                    if (hr == null || pr == null) return;
-
-                    if (!usesAppZygote(hr)) return;
-
-                    String pkg = resolvePackage(pr);
-                    if (pkg == null) return;
-                    if (!isDenied(pkg)) return;
-
-                    param.setResult(Boolean.TRUE);
-                    Logger.i("accepted startProcessLocked without app zygote fork for " + pkg);
                 }
-            }).size();
-            Logger.i("BindHook installed on ProcessList.startProcessLocked count=" + n);
+            }
+            Logger.i("BindHook installed on ProcessList.startProcessLocked count=" + count);
         } catch (Throwable t) {
             Logger.e("BindHook install failed", t);
         }
     }
 
+    /** Model interceptor-chain libxposed: tanpa proceed() berarti method asli dilewati. */
+    public static final class StartProcessLockedHooker implements XposedInterface.Hooker {
+        @Override
+        public Object intercept(@NonNull XposedInterface.Chain chain) throws Throwable {
+            String denied = null;
+            try {
+                denied = deniedPackage(chain.getArgs());
+            } catch (Throwable t) {
+                Logger.e("policy check failed", t);
+            }
+            if (denied != null) {
+                Logger.i("accepted startProcessLocked without app zygote fork for " + denied);
+                return Boolean.TRUE;
+            }
+            return chain.proceed();
+        }
+    }
+
+    /** @return nama paket yang harus ditolak, atau null bila proses boleh lanjut. */
+    @Nullable
+    private static String deniedPackage(@NonNull List<Object> args) {
+        Object hr = null;
+        Object pr = null;
+        for (Object arg : args) {
+            if (arg == null) continue;
+            String cn = arg.getClass().getName();
+            if (hr == null && HOSTING_RECORD.equals(cn)) {
+                hr = arg;
+            } else if (pr == null && PROCESS_RECORD.equals(cn)) {
+                pr = arg;
+            }
+        }
+        if (hr == null || pr == null) return null;
+        if (!usesAppZygote(hr)) return null;
+
+        String pkg = resolvePackage(pr);
+        if (pkg == null) return null;
+        return isDenied(pkg) ? pkg : null;
+    }
+
+    @Nullable
+    private static SharedPreferences openPrefs() {
+        XposedModule m = sModule;
+        if (m == null) return null;
+        try {
+            return m.getRemotePreferences(Constants.PREFS_NAME);
+        } catch (Throwable t) {
+            Logger.e("Failed to initialize remote preferences", t);
+            return null;
+        }
+    }
+
+    @Nullable
     private static String resolvePackage(Object processRecord) {
         try {
-            Object info = XposedHelpers.getObjectField(processRecord, "info");
+            Object info = getField(processRecord, "info");
             if (info == null) return null;
-            Object pkg = XposedHelpers.getObjectField(info, "packageName");
+            Object pkg = getField(info, "packageName");
             if (pkg instanceof String) {
                 String s = (String) pkg;
                 if (!s.isEmpty()) return s;
@@ -72,12 +123,19 @@ public class BindHook {
 
     private static boolean usesAppZygote(Object hostingRecord) {
         try {
-            Object result = XposedHelpers.callMethod(hostingRecord, "usesAppZygote");
-            if (result instanceof Boolean) return ((Boolean) result).booleanValue();
+            Method m = hostingRecord.getClass().getDeclaredMethod("usesAppZygote");
+            m.setAccessible(true);
+            Object result = m.invoke(hostingRecord);
+            if (result instanceof Boolean) {
+                return (Boolean) result;
+            }
         } catch (Throwable ignored) {
         }
+
         try {
-            return XposedHelpers.getIntField(hostingRecord, "mHostingZygote") == 2;
+            Field f = hostingRecord.getClass().getDeclaredField("mHostingZygote");
+            f.setAccessible(true);
+            return f.getInt(hostingRecord) == 2;
         } catch (Throwable ignored) {
         }
         return false;
@@ -86,18 +144,41 @@ public class BindHook {
     private static boolean isDenied(String pkg) {
         if (pkg == null) return false;
         if (Constants.APPLICATION_ID.equals(pkg)) return true;
-        try { sPrefs.reload(); } catch (Throwable ignored) {}
-        if (!sPrefs.getFile().canRead()) {
+
+        SharedPreferences prefs = sPrefs;
+        if (prefs == null) {
+            prefs = openPrefs();
+            sPrefs = prefs;
+        }
+        if (prefs == null) {
             if (BuildConfig.DEBUG) {
-                Logger.i("prefs file unreachable: " + sPrefs.getFile().getAbsolutePath());
+                Logger.i("remote preferences unavailable, cannot check pkg=" + pkg);
             }
             return false;
         }
-        Set<String> denied = sPrefs.getStringSet(Constants.KEY_DENIED, Collections.<String>emptySet());
+
+        Set<String> denied = prefs.getStringSet(Constants.KEY_DENIED, Collections.<String>emptySet());
         if (BuildConfig.DEBUG) {
-            Logger.i("policy snapshot size=" + (denied != null ? denied.size() : 0)
-                    + " checking pkg=" + pkg);
+            Logger.i("policy size=" + (denied != null ? denied.size() : 0) + " checking pkg=" + pkg);
         }
         return denied != null && denied.contains(pkg);
+    }
+
+    @Nullable
+    private static Object getField(Object target, String fieldName) {
+        if (target == null) return null;
+        Class<?> current = target.getClass();
+        while (current != null && current != Object.class) {
+            try {
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException e) {
+                current = current.getSuperclass();
+            } catch (Throwable ignored) {
+                break;
+            }
+        }
+        return null;
     }
 }

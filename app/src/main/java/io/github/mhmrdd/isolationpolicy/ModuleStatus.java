@@ -1,8 +1,16 @@
 package io.github.mhmrdd.isolationpolicy;
 
-public class ModuleStatus {
+/**
+ * Status koneksi ke framework Xposed. Diisi oleh {@link App} lewat
+ * XposedServiceHelper (service libxposed), bukan lagi lewat self-hook.
+ */
+public final class ModuleStatus {
+
+    static volatile boolean sBound = false;
+
+    private ModuleStatus() {}
 
     public static boolean isActive() {
-        return false;
+        return sBound;
     }
 }

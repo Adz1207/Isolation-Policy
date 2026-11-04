@@ -5,7 +5,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -91,29 +90,13 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    @SuppressWarnings("deprecation")
-    private SharedPreferences prefs() {
-        try {
-            return getSharedPreferences(Constants.PREFS_NAME, MODE_WORLD_READABLE);
-        } catch (SecurityException ignored) {
-            return getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE);
-        }
-    }
-
     private void loadDenied() {
         mDenied.clear();
-        Set<String> stored = prefs().getStringSet(Constants.KEY_DENIED, null);
-        if (stored != null) mDenied.addAll(stored);
-        mDenied.add(Constants.APPLICATION_ID);
+        mDenied.addAll(PolicyStore.load(this));
     }
 
     private void saveDenied() {
-        Set<String> out = new HashSet<String>(mDenied);
-        out.add(Constants.APPLICATION_ID);
-        prefs().edit().putStringSet(Constants.KEY_DENIED, out).apply();
-        if (BuildConfig.DEBUG) {
-            android.util.Log.i(Constants.TAG, "wrote policy " + Constants.PREFS_NAME + " size=" + out.size());
-        }
+        PolicyStore.save(this, mDenied);
     }
 
     private class ScanRunnable implements Runnable {
@@ -171,6 +154,7 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         StringBuilder sb = new StringBuilder();
         sb.append("module           : ").append(ModuleStatus.isActive() ? "active" : "disabled").append('\n');
+        sb.append("policy sync      : ").append(PolicyStore.hasRemote() ? "remote" : "local only").append('\n');
         sb.append(mTestHeadline).append('\n');
         if (!mTestDetail.isEmpty()) sb.append(mTestDetail).append('\n');
         sb.append("eligible: ").append(mEligibleCount)

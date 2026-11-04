@@ -1,15 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Dibutuhkan agar daftar aplikasi terpasang bisa dibaca (Android 11+) -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
-    <!--
-        Modul libxposed API 101+ tidak lagi memakai meta-data xposedmodule/xposeddescription.
-        Metadata modul ada di META-INF/xposed/{module.prop,scope.list,java_init.list},
-        nama dari android:label dan deskripsi dari android:description.
-        Provider XposedProvider otomatis ikut dari library io.github.libxposed:service.
-    -->
     <application
         android:name=".App"
         android:allowBackup="true"

@@ -86,6 +86,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         cancelPendingTest();
+        mUi.removeCallbacksAndMessages(null);
         mBgThread.quitSafely();
         super.onDestroy();
     }
@@ -158,7 +159,7 @@ public class MainActivity extends Activity {
         sb.append(mTestHeadline).append('\n');
         if (!mTestDetail.isEmpty()) sb.append(mTestDetail).append('\n');
         sb.append("eligible: ").append(mEligibleCount)
-                .append("    selected: ").append(Math.max(mDenied.size() - 1, 0));
+                .append("    selected: ").append(Math.max(mDenied.size() - (mDenied.contains(Constants.APPLICATION_ID) ? 1 : 0), 0));
         mStatus.setText(sb.toString());
     }
 
@@ -468,13 +469,6 @@ public class MainActivity extends Activity {
             label = v.findViewById(android.R.id.text1);
             pkg = v.findViewById(android.R.id.text2);
             cb = v.findViewById(android.R.id.checkbox);
-            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-                @Override
-                public void onCheckedChanged(CompoundButton btn, boolean on) {
-                    if (bound == null || bound.kind != Item.Kind.USER) return;
-                    if (on) mDenied.add(bound.pkg); else mDenied.remove(bound.pkg);
-                }
-            });
             v.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {

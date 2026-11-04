@@ -1,6 +1,8 @@
 package io.github.mhmrdd.isolationpolicy;
 
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.os.Build;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -8,6 +10,7 @@ import androidx.annotation.Nullable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -16,8 +19,7 @@ import io.github.libxposed.api.XposedModule;
 
 /**
  * Hook ProcessList#startProcessLocked di system_server.
- * Jika proses dihosting App Zygote dan paketnya ada di daftar tolak, permintaan
- * dilaporkan "berhasil" tanpa melakukan fork.
+ * Menggunakan caching refleksi dan volatile set untuk performa jalur panas (*hot path*).
  */
 public final class BindHook {
 
@@ -26,12 +28,21 @@ public final class BindHook {
 
     private static volatile XposedModule sModule;
     private static volatile SharedPreferences sPrefs;
+    private static volatile Set<String> sCachedDenied = Collections.emptySet();
+
+    private static Method sUsesAppZygoteMethod;
+    private static Field sHostingZygoteField;
+    private static Field sInfoField;
+    private static Field sPackageNameField;
+    private static Field sFlagsField;
 
     private BindHook() {}
 
     static void install(@NonNull XposedModule module, @NonNull ClassLoader cl) {
         sModule = module;
         sPrefs = openPrefs();
+        initPrefsListener(sPrefs);
+        reloadCachedDenied();
 
         try {
             Class<?> processList = cl.loadClass("com.android.server.am.ProcessList");
@@ -40,7 +51,6 @@ public final class BindHook {
                 if ("startProcessLocked".equals(method.getName())
                         && method.getReturnType() == boolean.class) {
                     try {
-                        // API 101+: hook(...) mengembalikan builder, lalu intercept(Hooker)
                         module.hook(method).intercept(new StartProcessLockedHooker());
                         count++;
                     } catch (Throwable t) {
@@ -48,13 +58,51 @@ public final class BindHook {
                     }
                 }
             }
-            Logger.i("BindHook installed on ProcessList.startProcessLocked count=" + count);
+            Logger.i("BindHook installed on ProcessList.startProcessLocked count=" + count + " on SDK " + Build.VERSION.SDK_INT);
         } catch (Throwable t) {
             Logger.e("BindHook install failed", t);
         }
     }
 
-    /** Model interceptor-chain libxposed: tanpa proceed() berarti method asli dilewati. */
+    private static synchronized void initPrefsListener(SharedPreferences prefs) {
+        if (prefs == null) return;
+        try {
+            prefs.registerOnSharedPreferenceChangeListener(new SharedPreferences.OnSharedPreferenceChangeListener() {
+                @Override
+                public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
+                    if (Constants.KEY_DENIED.equals(key)) {
+                        reloadCachedDenied();
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            Logger.e("Failed to register preferences listener", t);
+        }
+    }
+
+    private static void reloadCachedDenied() {
+        SharedPreferences prefs = sPrefs;
+        if (prefs == null) {
+            prefs = openPrefs();
+            sPrefs = prefs;
+        }
+        if (prefs == null) {
+            sCachedDenied = Collections.emptySet();
+            return;
+        }
+        try {
+            Set<String> denied = prefs.getStringSet(Constants.KEY_DENIED, null);
+            if (denied != null) {
+                sCachedDenied = new HashSet<>(denied);
+            } else {
+                sCachedDenied = Collections.emptySet();
+            }
+        } catch (Throwable t) {
+            Logger.e("Failed to load cached denied policy", t);
+            sCachedDenied = Collections.emptySet();
+        }
+    }
+
     public static final class StartProcessLockedHooker implements XposedInterface.Hooker {
         @Override
         public Object intercept(@NonNull XposedInterface.Chain chain) throws Throwable {
@@ -72,7 +120,6 @@ public final class BindHook {
         }
     }
 
-    /** @return nama paket yang harus ditolak, atau null bila proses boleh lanjut. */
     @Nullable
     private static String deniedPackage(@NonNull List<Object> args) {
         Object hr = null;
@@ -88,6 +135,8 @@ public final class BindHook {
         }
         if (hr == null || pr == null) return null;
         if (!usesAppZygote(hr)) return null;
+
+        if (isSystemPackage(pr)) return null;
 
         String pkg = resolvePackage(pr);
         if (pkg == null) return null;
@@ -106,12 +155,23 @@ public final class BindHook {
         }
     }
 
+    private static boolean isSystemPackage(Object processRecord) {
+        try {
+            Object info = getFieldCached(processRecord, "info");
+            if (info == null) return false;
+            int flags = getIntFieldCached(info, "flags");
+            return (flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     @Nullable
     private static String resolvePackage(Object processRecord) {
         try {
-            Object info = getField(processRecord, "info");
+            Object info = getFieldCached(processRecord, "info");
             if (info == null) return null;
-            Object pkg = getField(info, "packageName");
+            Object pkg = getFieldCached(info, "packageName");
             if (pkg instanceof String) {
                 String s = (String) pkg;
                 if (!s.isEmpty()) return s;
@@ -123,19 +183,21 @@ public final class BindHook {
 
     private static boolean usesAppZygote(Object hostingRecord) {
         try {
-            Method m = hostingRecord.getClass().getDeclaredMethod("usesAppZygote");
-            m.setAccessible(true);
-            Object result = m.invoke(hostingRecord);
-            if (result instanceof Boolean) {
-                return (Boolean) result;
+            Method m = getUsesAppZygoteMethodCached(hostingRecord.getClass());
+            if (m != null) {
+                Object result = m.invoke(hostingRecord);
+                if (result instanceof Boolean) {
+                    return (Boolean) result;
+                }
             }
         } catch (Throwable ignored) {
         }
 
         try {
-            Field f = hostingRecord.getClass().getDeclaredField("mHostingZygote");
-            f.setAccessible(true);
-            return f.getInt(hostingRecord) == 2;
+            Field f = getHostingZygoteFieldCached(hostingRecord.getClass());
+            if (f != null) {
+                return f.getInt(hostingRecord) == 2;
+            }
         } catch (Throwable ignored) {
         }
         return false;
@@ -145,23 +207,75 @@ public final class BindHook {
         if (pkg == null) return false;
         if (Constants.APPLICATION_ID.equals(pkg)) return true;
 
-        SharedPreferences prefs = sPrefs;
-        if (prefs == null) {
-            prefs = openPrefs();
-            sPrefs = prefs;
+        Set<String> denied = sCachedDenied;
+        if (denied.isEmpty() && sPrefs != null) {
+            reloadCachedDenied();
+            denied = sCachedDenied;
         }
-        if (prefs == null) {
-            if (BuildConfig.DEBUG) {
-                Logger.i("remote preferences unavailable, cannot check pkg=" + pkg);
-            }
-            return false;
-        }
+        return denied.contains(pkg);
+    }
 
-        Set<String> denied = prefs.getStringSet(Constants.KEY_DENIED, Collections.<String>emptySet());
-        if (BuildConfig.DEBUG) {
-            Logger.i("policy size=" + (denied != null ? denied.size() : 0) + " checking pkg=" + pkg);
+    @Nullable
+    private static Method getUsesAppZygoteMethodCached(Class<?> clazz) {
+        if (sUsesAppZygoteMethod == null) {
+            try {
+                Method m = clazz.getDeclaredMethod("usesAppZygote");
+                m.setAccessible(true);
+                sUsesAppZygoteMethod = m;
+            } catch (Throwable ignored) {}
         }
-        return denied != null && denied.contains(pkg);
+        return sUsesAppZygoteMethod;
+    }
+
+    @Nullable
+    private static Field getHostingZygoteFieldCached(Class<?> clazz) {
+        if (sHostingZygoteField == null) {
+            try {
+                Field f = clazz.getDeclaredField("mHostingZygote");
+                f.setAccessible(true);
+                sHostingZygoteField = f;
+            } catch (Throwable ignored) {}
+        }
+        return sHostingZygoteField;
+    }
+
+    @Nullable
+    private static Object getFieldCached(Object target, String fieldName) {
+        if (target == null) return null;
+        try {
+            if ("info".equals(fieldName)) {
+                if (sInfoField == null) {
+                    Field f = target.getClass().getDeclaredField("info");
+                    f.setAccessible(true);
+                    sInfoField = f;
+                }
+                return sInfoField.get(target);
+            } else if ("packageName".equals(fieldName)) {
+                if (sPackageNameField == null) {
+                    Field f = target.getClass().getDeclaredField("packageName");
+                    f.setAccessible(true);
+                    sPackageNameField = f;
+                }
+                return sPackageNameField.get(target);
+            }
+        } catch (Throwable ignored) {}
+        return getField(target, fieldName);
+    }
+
+    private static int getIntFieldCached(Object target, String fieldName) {
+        try {
+            if ("flags".equals(fieldName)) {
+                if (sFlagsField == null) {
+                    Field f = target.getClass().getDeclaredField("flags");
+                    f.setAccessible(true);
+                    sFlagsField = f;
+                }
+                return sFlagsField.getInt(target);
+            }
+        } catch (Throwable ignored) {}
+        Object val = getField(target, fieldName);
+        if (val instanceof Integer) return (Integer) val;
+        return 0;
     }
 
     @Nullable

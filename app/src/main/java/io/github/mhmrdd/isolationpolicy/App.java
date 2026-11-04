@@ -2,6 +2,7 @@ package io.github.mhmrdd.isolationpolicy;
 
 import android.app.Application;
 import android.content.SharedPreferences;
+import android.os.Process;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -18,6 +19,8 @@ public class App extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        if (Process.isIsolated()) return;
+
         XposedServiceHelper.registerListener(new XposedServiceHelper.OnServiceListener() {
             @Override
             public void onServiceBind(@NonNull XposedService service) {

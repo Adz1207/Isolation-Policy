@@ -110,9 +110,7 @@ public class MainActivity extends Activity {
             String selfPkg = Constants.APPLICATION_ID;
             for (ApplicationInfo ai : all) {
                 boolean isSelf = selfPkg.equals(ai.packageName);
-                boolean isSystem = ai.uid < 10000
-                        || ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0
-                            && (ai.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0);
+                boolean isSystem = Constants.isSystemPackage(ai.uid, ai.flags);
                 Item.Kind k = isSelf ? Item.Kind.SELF
                         : isSystem ? Item.Kind.SYSTEM
                         : Item.Kind.USER;

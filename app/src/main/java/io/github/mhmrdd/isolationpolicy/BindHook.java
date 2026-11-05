@@ -29,12 +29,12 @@ public final class BindHook {
     private static volatile XposedModule sModule;
     private static volatile SharedPreferences sPrefs;
     private static volatile Set<String> sCachedDenied = Collections.emptySet();
+    private static SharedPreferences.OnSharedPreferenceChangeListener sPrefsListener;
 
     private static Method sUsesAppZygoteMethod;
     private static Field sHostingZygoteField;
     private static Field sInfoField;
     private static Field sPackageNameField;
-    private static Field sFlagsField;
 
     private BindHook() {}
 
@@ -67,14 +67,15 @@ public final class BindHook {
     private static synchronized void initPrefsListener(SharedPreferences prefs) {
         if (prefs == null) return;
         try {
-            prefs.registerOnSharedPreferenceChangeListener(new SharedPreferences.OnSharedPreferenceChangeListener() {
+            sPrefsListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
                 @Override
                 public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
                     if (Constants.KEY_DENIED.equals(key)) {
                         reloadCachedDenied();
                     }
                 }
-            });
+            };
+            prefs.registerOnSharedPreferenceChangeListener(sPrefsListener);
         } catch (Throwable t) {
             Logger.e("Failed to register preferences listener", t);
         }
@@ -158,9 +159,9 @@ public final class BindHook {
     private static boolean isSystemPackage(Object processRecord) {
         try {
             Object info = getFieldCached(processRecord, "info");
-            if (info == null) return false;
-            int flags = getIntFieldCached(info, "flags");
-            return (flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            if (!(info instanceof ApplicationInfo)) return false;
+            ApplicationInfo appInfo = (ApplicationInfo) info;
+            return Constants.isSystemPackage(appInfo.uid, appInfo.flags);
         } catch (Throwable ignored) {
         }
         return false;
@@ -207,12 +208,7 @@ public final class BindHook {
         if (pkg == null) return false;
         if (Constants.APPLICATION_ID.equals(pkg)) return true;
 
-        Set<String> denied = sCachedDenied;
-        if (denied.isEmpty() && sPrefs != null) {
-            reloadCachedDenied();
-            denied = sCachedDenied;
-        }
-        return denied.contains(pkg);
+        return sCachedDenied.contains(pkg);
     }
 
     @Nullable
@@ -260,22 +256,6 @@ public final class BindHook {
             }
         } catch (Throwable ignored) {}
         return getField(target, fieldName);
-    }
-
-    private static int getIntFieldCached(Object target, String fieldName) {
-        try {
-            if ("flags".equals(fieldName)) {
-                if (sFlagsField == null) {
-                    Field f = target.getClass().getDeclaredField("flags");
-                    f.setAccessible(true);
-                    sFlagsField = f;
-                }
-                return sFlagsField.getInt(target);
-            }
-        } catch (Throwable ignored) {}
-        Object val = getField(target, fieldName);
-        if (val instanceof Integer) return (Integer) val;
-        return 0;
     }
 
     @Nullable

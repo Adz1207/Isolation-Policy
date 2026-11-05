@@ -19,14 +19,14 @@ System packages cannot be added to the deny list. The module's own package is al
 
 ## Build
 
-Requires JDK 17 or newer and the Android SDK (platform 36).
+Requires JDK 17 or newer and the Android SDK (platform 37).
 
 ```
 chmod +x gradlew
 ./gradlew assembleDebug
 ```
 
-The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The GitHub Actions workflow (`Android CI`) produces the same artifact.
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The GitHub Actions workflow (`Build and Release`) produces the same artifact.
 
 For a signed release build, set `KEYSTORE_PATH`, `KEYSTORE_PASS` and `KEYPASS` (key alias `isolationpolicy`) and run `./gradlew assembleRelease`.
 

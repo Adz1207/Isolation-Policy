@@ -24,7 +24,6 @@ public class App extends Application {
         XposedServiceHelper.registerListener(new XposedServiceHelper.OnServiceListener() {
             @Override
             public void onServiceBind(@NonNull XposedService service) {
-                ModuleStatus.sBound = true;
                 try {
                     SharedPreferences remote = service.getRemotePreferences(Constants.PREFS_NAME);
                     PolicyStore.setRemote(remote);
@@ -32,12 +31,13 @@ public class App extends Application {
                 } catch (Throwable t) {
                     Log.w(Constants.TAG, "remote preferences not available: " + t);
                 }
+                ModuleStatus.notifyStatusChanged(true);
             }
 
             @Override
             public void onServiceDied(@NonNull XposedService service) {
-                ModuleStatus.sBound = false;
                 PolicyStore.setRemote(null);
+                ModuleStatus.notifyStatusChanged(false);
             }
         });
     }

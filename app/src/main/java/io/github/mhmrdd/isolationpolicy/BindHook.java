@@ -1,5 +1,6 @@
 package io.github.mhmrdd.isolationpolicy;
 
+import android.annotation.SuppressLint;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
@@ -21,6 +22,7 @@ import io.github.libxposed.api.XposedModule;
  * Hook ProcessList#startProcessLocked di system_server.
  * Menggunakan caching refleksi dan volatile set untuk performa jalur panas (*hot path*).
  */
+@SuppressLint({"PrivateApi", "DiscouragedPrivateApi"})
 public final class BindHook {
 
     private static final String HOSTING_RECORD = "com.android.server.am.HostingRecord";
@@ -31,10 +33,9 @@ public final class BindHook {
     private static volatile Set<String> sCachedDenied = Collections.emptySet();
     private static SharedPreferences.OnSharedPreferenceChangeListener sPrefsListener;
 
-    private static Method sUsesAppZygoteMethod;
-    private static Field sHostingZygoteField;
-    private static Field sInfoField;
-    private static Field sPackageNameField;
+    private static volatile Method sUsesAppZygoteMethod;
+    private static volatile Field sHostingZygoteField;
+    private static volatile Field sInfoField;
 
     private BindHook() {}
 
@@ -65,14 +66,11 @@ public final class BindHook {
     }
 
     private static synchronized void initPrefsListener(SharedPreferences prefs) {
-        if (prefs == null) return;
+        if (prefs == null || sPrefsListener != null) return;
         try {
-            sPrefsListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
-                @Override
-                public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
-                    if (Constants.KEY_DENIED.equals(key)) {
-                        reloadCachedDenied();
-                    }
+            sPrefsListener = (sharedPreferences, key) -> {
+                if (Constants.KEY_DENIED.equals(key)) {
+                    reloadCachedDenied();
                 }
             };
             prefs.registerOnSharedPreferenceChangeListener(sPrefsListener);
@@ -158,10 +156,10 @@ public final class BindHook {
 
     private static boolean isSystemPackage(Object processRecord) {
         try {
-            Object info = getFieldCached(processRecord, "info");
-            if (!(info instanceof ApplicationInfo)) return false;
-            ApplicationInfo appInfo = (ApplicationInfo) info;
-            return Constants.isSystemPackage(appInfo.uid, appInfo.flags);
+            Object info = getProcessInfoCached(processRecord);
+            if (info instanceof ApplicationInfo appInfo) {
+                return Constants.isSystemPackage(appInfo.uid, appInfo.flags);
+            }
         } catch (Throwable ignored) {
         }
         return false;
@@ -170,12 +168,15 @@ public final class BindHook {
     @Nullable
     private static String resolvePackage(Object processRecord) {
         try {
-            Object info = getFieldCached(processRecord, "info");
-            if (info == null) return null;
-            Object pkg = getFieldCached(info, "packageName");
-            if (pkg instanceof String) {
-                String s = (String) pkg;
-                if (!s.isEmpty()) return s;
+            Object info = getProcessInfoCached(processRecord);
+            if (info instanceof ApplicationInfo appInfo) {
+                String s = appInfo.packageName;
+                if (s != null && !s.isEmpty()) return s;
+            } else if (info != null) {
+                Object pkg = getField(info, "packageName");
+                if (pkg instanceof String s) {
+                    if (!s.isEmpty()) return s;
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -208,54 +209,68 @@ public final class BindHook {
         if (pkg == null) return false;
         if (Constants.APPLICATION_ID.equals(pkg)) return true;
 
+        if (sPrefs == null || sPrefsListener == null) {
+            reloadCachedDenied();
+            initPrefsListener(sPrefs);
+        }
+
         return sCachedDenied.contains(pkg);
     }
 
     @Nullable
     private static Method getUsesAppZygoteMethodCached(Class<?> clazz) {
-        if (sUsesAppZygoteMethod == null) {
-            try {
-                Method m = clazz.getDeclaredMethod("usesAppZygote");
-                m.setAccessible(true);
-                sUsesAppZygoteMethod = m;
-            } catch (Throwable ignored) {}
+        Method m = sUsesAppZygoteMethod;
+        if (m == null) {
+            synchronized (BindHook.class) {
+                m = sUsesAppZygoteMethod;
+                if (m == null) {
+                    try {
+                        m = clazz.getDeclaredMethod("usesAppZygote");
+                        m.setAccessible(true);
+                        sUsesAppZygoteMethod = m;
+                    } catch (Throwable ignored) {}
+                }
+            }
         }
-        return sUsesAppZygoteMethod;
+        return m;
     }
 
     @Nullable
     private static Field getHostingZygoteFieldCached(Class<?> clazz) {
-        if (sHostingZygoteField == null) {
-            try {
-                Field f = clazz.getDeclaredField("mHostingZygote");
-                f.setAccessible(true);
-                sHostingZygoteField = f;
-            } catch (Throwable ignored) {}
+        Field f = sHostingZygoteField;
+        if (f == null) {
+            synchronized (BindHook.class) {
+                f = sHostingZygoteField;
+                if (f == null) {
+                    try {
+                        f = clazz.getDeclaredField("mHostingZygote");
+                        f.setAccessible(true);
+                        sHostingZygoteField = f;
+                    } catch (Throwable ignored) {}
+                }
+            }
         }
-        return sHostingZygoteField;
+        return f;
     }
 
     @Nullable
-    private static Object getFieldCached(Object target, String fieldName) {
-        if (target == null) return null;
+    private static Object getProcessInfoCached(Object processRecord) {
+        if (processRecord == null) return null;
         try {
-            if ("info".equals(fieldName)) {
-                if (sInfoField == null) {
-                    Field f = target.getClass().getDeclaredField("info");
-                    f.setAccessible(true);
-                    sInfoField = f;
+            Field f = sInfoField;
+            if (f == null) {
+                synchronized (BindHook.class) {
+                    f = sInfoField;
+                    if (f == null) {
+                        f = processRecord.getClass().getDeclaredField("info");
+                        f.setAccessible(true);
+                        sInfoField = f;
+                    }
                 }
-                return sInfoField.get(target);
-            } else if ("packageName".equals(fieldName)) {
-                if (sPackageNameField == null) {
-                    Field f = target.getClass().getDeclaredField("packageName");
-                    f.setAccessible(true);
-                    sPackageNameField = f;
-                }
-                return sPackageNameField.get(target);
             }
+            return f.get(processRecord);
         } catch (Throwable ignored) {}
-        return getField(target, fieldName);
+        return getField(processRecord, "info");
     }
 
     @Nullable

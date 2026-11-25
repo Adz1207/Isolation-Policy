@@ -2,4 +2,7 @@
 <resources>
     <string name="app_name">IsolPolicy</string>
     <string name="app_description">Deny useAppZygote per package</string>
+    <string name="refresh">Refresh</string>
+    <string name="apply_changes">Apply changes</string>
+    <string name="search_hint">filter by name or package</string>
 </resources>

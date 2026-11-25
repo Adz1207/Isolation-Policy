@@ -1,5 +1,6 @@
 package io.github.mhmrdd.isolationpolicy;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Context;
@@ -24,7 +25,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
-import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -32,14 +32,15 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -49,12 +50,10 @@ public class MainActivity extends Activity {
     private static final long TEST_BIND_TIMEOUT_MS = 6000L;
 
     private TextView mStatus;
-    private EditText mSearch;
     private RecyclerView mList;
     private ProgressBar mProgress;
-    private Button mApply;
 
-    private final Set<String> mDenied = new TreeSet<String>();
+    private final Set<String> mDenied = new TreeSet<>();
     private final Adapter mAdapter = new Adapter();
     private int mEligibleCount = 0;
     private String mTestHeadline = "isolated service : binding ...";
@@ -63,9 +62,7 @@ public class MainActivity extends Activity {
     private final HandlerThread mBgThread = new HandlerThread("isolpolicy-bg");
     private Handler mBg;
     private String mFilter = "";
-    private final Runnable mApplyFilter = new Runnable() {
-        @Override public void run() { mAdapter.setFilter(mFilter); }
-    };
+    private final Runnable mApplyFilter = () -> mAdapter.setFilter(mFilter);
     private ServiceConnection mTestConnection;
     private Runnable mTestTimeout;
 
@@ -77,14 +74,17 @@ public class MainActivity extends Activity {
         mBgThread.start();
         mBg = new Handler(mBgThread.getLooper());
 
+        ModuleStatus.setStatusListener(bound -> mUi.post(this::refreshStatus));
+
         loadDenied();
         refreshStatus();
-        mBg.post(new ScanRunnable());
+        mBg.post(new ScanRunnable(new HashSet<>(mDenied)));
         runTest();
     }
 
     @Override
     protected void onDestroy() {
+        ModuleStatus.setStatusListener(null);
         cancelPendingTest();
         mUi.removeCallbacksAndMessages(null);
         mBgThread.quitSafely();
@@ -101,11 +101,17 @@ public class MainActivity extends Activity {
     }
 
     private class ScanRunnable implements Runnable {
+        private final Set<String> mDeniedSnapshot;
+
+        ScanRunnable(Set<String> deniedSnapshot) {
+            this.mDeniedSnapshot = deniedSnapshot;
+        }
+
         @Override
         public void run() {
             PackageManager pm = getPackageManager();
             List<ApplicationInfo> all = pm.getInstalledApplications(0);
-            List<Item> built = new ArrayList<Item>(all.size());
+            List<Item> built = new ArrayList<>(all.size());
             int eligible = 0;
             String selfPkg = Constants.APPLICATION_ID;
             for (ApplicationInfo ai : all) {
@@ -121,9 +127,22 @@ public class MainActivity extends Activity {
                 built.add(new Item(ai.packageName, label, icon, k));
                 if (k == Item.Kind.USER) eligible++;
             }
-            Collections.sort(built, ITEM_COMPARATOR);
+            built.sort((a, b) -> {
+                int oa = order(a);
+                int ob = order(b);
+                if (oa != ob) return oa - ob;
+                int byLabel = a.labelLower.compareTo(b.labelLower);
+                if (byLabel != 0) return byLabel;
+                return a.pkg.compareTo(b.pkg);
+            });
             final int eligibleCount = eligible;
             mUi.post(new ApplyScanResult(built, eligibleCount));
+        }
+
+        private int order(Item it) {
+            if (it.kind == Item.Kind.SELF) return 0;
+            if (it.kind == Item.Kind.SYSTEM) return 3;
+            return mDeniedSnapshot.contains(it.pkg) ? 1 : 2;
         }
     }
 
@@ -144,12 +163,13 @@ public class MainActivity extends Activity {
     private void rescan() {
         if (mProgress != null) mProgress.setVisibility(View.VISIBLE);
         if (mList != null) mList.setVisibility(View.GONE);
-        mAdapter.setItems(Collections.<Item>emptyList());
+        mAdapter.setItems(Collections.emptyList());
         mEligibleCount = 0;
         refreshStatus();
-        mBg.post(new ScanRunnable());
+        mBg.post(new ScanRunnable(new HashSet<>(mDenied)));
     }
 
+    @SuppressLint("SetTextI18n")
     private void refreshStatus() {
         StringBuilder sb = new StringBuilder();
         sb.append("module           : ").append(ModuleStatus.isActive() ? "active" : "disabled").append('\n');
@@ -205,17 +225,14 @@ public class MainActivity extends Activity {
             refreshStatus();
             return;
         }
-        mTestTimeout = new Runnable() {
-            @Override
-            public void run() {
-                if (mTestConnection != conn) return;
-                try { unbindService(conn); } catch (Throwable ignored) {}
-                mTestConnection = null;
-                mTestTimeout = null;
-                mTestHeadline = "isolated service : not bound";
-                mTestDetail = "reason : connection timed out";
-                refreshStatus();
-            }
+        mTestTimeout = () -> {
+            if (mTestConnection != conn) return;
+            try { unbindService(conn); } catch (Throwable ignored) {}
+            mTestConnection = null;
+            mTestTimeout = null;
+            mTestHeadline = "isolated service : not bound";
+            mTestDetail = "reason : connection timed out";
+            refreshStatus();
         };
         mUi.postDelayed(mTestTimeout, TEST_BIND_TIMEOUT_MS);
     }
@@ -274,19 +291,19 @@ public class MainActivity extends Activity {
         LinearLayout searchRow = new LinearLayout(this);
         searchRow.setOrientation(LinearLayout.HORIZONTAL);
 
-        mSearch = new EditText(this);
-        mSearch.setHint("filter by name or package");
-        mSearch.setTextColor(textC);
-        mSearch.setHintTextColor(sub);
-        mSearch.setTextSize(13f);
-        mSearch.setSingleLine(true);
-        mSearch.setBackgroundColor(faint);
-        mSearch.setPadding(dp(10), dp(8), dp(10), dp(8));
-        mSearch.addTextChangedListener(new SearchWatcher());
-        searchRow.addView(mSearch, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        EditText search = new EditText(this);
+        search.setHint(R.string.search_hint);
+        search.setTextColor(textC);
+        search.setHintTextColor(sub);
+        search.setTextSize(13f);
+        search.setSingleLine(true);
+        search.setBackgroundColor(faint);
+        search.setPadding(dp(10), dp(8), dp(10), dp(8));
+        search.addTextChangedListener(new SearchWatcher());
+        searchRow.addView(search, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
         Button refresh = new Button(this);
-        refresh.setText("Refresh");
+        refresh.setText(R.string.refresh);
         refresh.setTextSize(13f);
         refresh.setOnClickListener(new RefreshClick());
         LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
@@ -315,12 +332,12 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(8);
         root.addView(listArea, lp);
 
-        mApply = new Button(this);
-        mApply.setText("Apply changes");
-        mApply.setOnClickListener(new ApplyClick());
+        Button apply = new Button(this);
+        apply.setText(R.string.apply_changes);
+        apply.setOnClickListener(new ApplyClick());
         LinearLayout.LayoutParams brp = new LinearLayout.LayoutParams(MATCH, WRAP);
         brp.topMargin = dp(8);
-        root.addView(mApply, brp);
+        root.addView(apply, brp);
         return root;
     }
 
@@ -342,34 +359,16 @@ public class MainActivity extends Activity {
         Item(String pkg, String label, Drawable icon, Kind kind) {
             this.pkg = pkg;
             this.label = label;
-            this.labelLower = label.toLowerCase();
-            this.pkgLower = pkg.toLowerCase();
+            this.labelLower = label.toLowerCase(Locale.ROOT);
+            this.pkgLower = pkg.toLowerCase(Locale.ROOT);
             this.icon = icon;
             this.kind = kind;
         }
     }
 
-    private final java.util.Comparator<Item> ITEM_COMPARATOR = new java.util.Comparator<Item>() {
-        @Override
-        public int compare(Item a, Item b) {
-            int oa = order(a);
-            int ob = order(b);
-            if (oa != ob) return oa - ob;
-            int byLabel = a.labelLower.compareTo(b.labelLower);
-            if (byLabel != 0) return byLabel;
-            return a.pkg.compareTo(b.pkg);
-        }
-
-        private int order(Item it) {
-            if (it.kind == Item.Kind.SELF) return 0;
-            if (it.kind == Item.Kind.SYSTEM) return 3;
-            return mDenied.contains(it.pkg) ? 1 : 2;
-        }
-    };
-
     private class Adapter extends RecyclerView.Adapter<RowVH> {
-        private final List<Item> mAll = new ArrayList<Item>();
-        private final List<Item> mShown = new ArrayList<Item>();
+        private final List<Item> mAll = new ArrayList<>();
+        private final List<Item> mShown = new ArrayList<>();
         private String mAdapterFilter = "";
 
         void setItems(List<Item> items) {
@@ -379,10 +378,11 @@ public class MainActivity extends Activity {
         }
 
         void setFilter(String f) {
-            mAdapterFilter = f == null ? "" : f.toLowerCase();
+            mAdapterFilter = f == null ? "" : f.toLowerCase(Locale.ROOT);
             recompute();
         }
 
+        @SuppressLint("NotifyDataSetChanged")
         private void recompute() {
             mShown.clear();
             if (mAdapterFilter.isEmpty()) {
@@ -397,13 +397,14 @@ public class MainActivity extends Activity {
             notifyDataSetChanged();
         }
 
+        @NonNull
         @Override
-        public RowVH onCreateViewHolder(ViewGroup parent, int viewType) {
+        public RowVH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             return new RowVH(buildRowView(parent.getContext()));
         }
 
         @Override
-        public void onBindViewHolder(RowVH holder, int position) {
+        public void onBindViewHolder(@NonNull RowVH holder, int position) {
             holder.bind(mShown.get(position));
         }
 
@@ -413,7 +414,6 @@ public class MainActivity extends Activity {
 
     private static View buildRowView(Context ctx) {
         int activeC = Color.parseColor("#FFE8E8E8");
-        int dimC = Color.parseColor("#FF707070");
         int subC = Color.parseColor("#FFA0A0A0");
 
         LinearLayout row = new LinearLayout(ctx);
@@ -467,14 +467,12 @@ public class MainActivity extends Activity {
             label = v.findViewById(android.R.id.text1);
             pkg = v.findViewById(android.R.id.text2);
             cb = v.findViewById(android.R.id.checkbox);
-            v.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View view) {
-                    if (cb.isEnabled()) cb.setChecked(!cb.isChecked());
-                }
+            v.setOnClickListener(view -> {
+                if (cb.isEnabled()) cb.setChecked(!cb.isChecked());
             });
         }
 
+        @SuppressLint("SetTextI18n")
         void bind(Item it) {
             bound = it;
             int active = Color.parseColor("#FFE8E8E8");
@@ -499,12 +497,10 @@ public class MainActivity extends Activity {
                 cb.setChecked(mDenied.contains(it.pkg));
                 cb.setEnabled(true);
             }
-            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-                @Override
-                public void onCheckedChanged(CompoundButton btn, boolean on) {
-                    if (bound == null || bound.kind != Item.Kind.USER) return;
-                    if (on) mDenied.add(bound.pkg); else mDenied.remove(bound.pkg);
-                }
+            cb.setOnCheckedChangeListener((btn, on) -> {
+                if (bound == null || bound.kind != Item.Kind.USER) return;
+                if (on) mDenied.add(bound.pkg); else mDenied.remove(bound.pkg);
+                refreshStatus();
             });
         }
     }
